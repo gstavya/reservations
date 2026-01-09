@@ -1,21 +1,30 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import json
 import os
 
 app = Flask(__name__)
 
-# Database file
-DB_FILE = 'reservations.db'
+# Get database URL from environment (Railway provides DATABASE_URL)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def get_db_connection():
+    """Get database connection"""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable is not set")
+    
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
 
 def init_db():
     """Initialize the database with reservations table"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS reservations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             start_time TEXT NOT NULL,
             end_time TEXT NOT NULL,
             description TEXT,
@@ -25,12 +34,6 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-
-def get_db_connection():
-    """Get database connection"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 def format_vapi_response(tool_call_id, result=None, error=None):
     """Format response according to Vapi requirements"""
@@ -127,14 +130,14 @@ def handle_create_reservation(params):
             return None, "end_time must be after start_time"
         
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         
         # Check for conflicts
         c.execute('''
             SELECT * FROM reservations 
-            WHERE (start_time < ? AND end_time > ?)
-               OR (start_time < ? AND end_time > ?)
-               OR (start_time >= ? AND end_time <= ?)
+            WHERE (start_time < %s AND end_time > %s)
+               OR (start_time < %s AND end_time > %s)
+               OR (start_time >= %s AND end_time <= %s)
         ''', (end_time, start_time, end_time, start_time, start_time, end_time))
         
         if c.fetchone():
@@ -145,16 +148,17 @@ def handle_create_reservation(params):
         created_at = datetime.utcnow().isoformat() + 'Z'
         c.execute('''
             INSERT INTO reservations (start_time, end_time, description, created_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
         ''', (start_time, end_time, description, created_at))
         
-        reservation_id = c.lastrowid
+        reservation_id = c.fetchone()['id']
         conn.commit()
         conn.close()
         
         return f"Reservation created successfully. ID: {reservation_id}, Start: {start_time}, End: {end_time}", None
     
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return None, "Reservation already exists for this time slot"
     except Exception as e:
         return None, f"Error creating reservation: {str(e)}"
@@ -169,14 +173,14 @@ def handle_check_availability(params):
             return None, "start_time and end_time are required"
         
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         
         # Check for conflicts
         c.execute('''
             SELECT * FROM reservations 
-            WHERE (start_time < ? AND end_time > ?)
-               OR (start_time < ? AND end_time > ?)
-               OR (start_time >= ? AND end_time <= ?)
+            WHERE (start_time < %s AND end_time > %s)
+               OR (start_time < %s AND end_time > %s)
+               OR (start_time >= %s AND end_time <= %s)
         ''', (end_time, start_time, end_time, start_time, start_time, end_time))
         
         conflicts = c.fetchall()
@@ -204,12 +208,12 @@ def handle_list_reservations(params):
         end_date = params.get('end_date')
         
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         
         if start_date and end_date:
             c.execute('''
                 SELECT * FROM reservations 
-                WHERE start_time >= ? AND end_time <= ?
+                WHERE start_time >= %s AND end_time <= %s
                 ORDER BY start_time ASC
             ''', (start_date, end_date))
         else:
@@ -244,12 +248,12 @@ def handle_cancel_reservation(params):
         end_time = params.get('end_time')
         
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         
         if reservation_id:
-            c.execute('DELETE FROM reservations WHERE id = ?', (reservation_id,))
+            c.execute('DELETE FROM reservations WHERE id = %s', (reservation_id,))
         elif start_time and end_time:
-            c.execute('DELETE FROM reservations WHERE start_time = ? AND end_time = ?', 
+            c.execute('DELETE FROM reservations WHERE start_time = %s AND end_time = %s', 
                      (start_time, end_time))
         else:
             conn.close()
@@ -277,7 +281,7 @@ def get_reservations():
     """Direct API endpoint to get all reservations (non-Vapi)"""
     try:
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute('SELECT * FROM reservations ORDER BY start_time ASC')
         reservations = c.fetchall()
         conn.close()
@@ -300,4 +304,3 @@ if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
-
