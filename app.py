@@ -35,23 +35,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-def format_vapi_response(tool_call_id, result=None, error=None):
-    """Format response according to Vapi requirements"""
-    response = {
-        "results": [
-            {
-                "toolCallId": tool_call_id
-            }
-        ]
-    }
-    
-    if error:
-        response["results"][0]["error"] = str(error)
-    else:
-        response["results"][0]["result"] = str(result)
-    
-    return jsonify(response), 200
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Main webhook endpoint for Vapi tool calls"""
@@ -89,16 +72,23 @@ def webhook():
             
             # Format result as single-line string (Vapi requirement)
             if error:
+                # Remove ALL line breaks from error messages
+                error_str = str(error).replace('\n', ' ').replace('\r', '')
                 results.append({
                     "toolCallId": tool_call_id,
-                    "error": str(error)
+                    "error": error_str
                 })
             else:
-                # Convert result to single-line string
+                # Convert result to single-line string - NO LINE BREAKS
                 if isinstance(result, (dict, list)):
-                    result_str = json.dumps(result, separators=(',', ':'))
+                    # Use ensure_ascii=False to handle unicode, but NO indentation/newlines
+                    result_str = json.dumps(result, separators=(',', ':'), ensure_ascii=False)
                 else:
                     result_str = str(result)
+                
+                # CRITICAL: Remove ALL line breaks (Vapi requirement)
+                result_str = result_str.replace('\n', ' ').replace('\r', '')
+                
                 results.append({
                     "toolCallId": tool_call_id,
                     "result": result_str
@@ -107,10 +97,13 @@ def webhook():
         return jsonify({"results": results}), 200
     
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Even on exception, return 200 with error in results
+        error_str = str(e).replace('\n', ' ').replace('\r', '')
+        return jsonify({"error": error_str}), 200
 
 def handle_create_reservation(params):
     """Handle reservation creation"""
+    conn = None
     try:
         start_time = params.get('start_time')
         end_time = params.get('end_time')
@@ -156,15 +149,23 @@ def handle_create_reservation(params):
         conn.commit()
         conn.close()
         
+        # Return single-line string (no line breaks)
         return f"Reservation created successfully. ID: {reservation_id}, Start: {start_time}, End: {end_time}", None
     
     except psycopg2.IntegrityError:
+        if conn:
+            conn.rollback()
+            conn.close()
         return None, "Reservation already exists for this time slot"
     except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
         return None, f"Error creating reservation: {str(e)}"
 
 def handle_check_availability(params):
     """Check if a time slot is available"""
+    conn = None
     try:
         start_time = params.get('start_time')
         end_time = params.get('end_time')
@@ -192,17 +193,21 @@ def handle_check_availability(params):
                 conflict_list.append({
                     "start_time": conflict['start_time'],
                     "end_time": conflict['end_time'],
-                    "description": conflict['description']
+                    "description": conflict.get('description', '')
                 })
+            # Return dict - will be converted to single-line JSON
             return {"available": False, "conflicts": conflict_list}, None
         else:
             return {"available": True}, None
     
     except Exception as e:
+        if conn:
+            conn.close()
         return None, f"Error checking availability: {str(e)}"
 
 def handle_list_reservations(params):
     """List all reservations, optionally filtered by date range"""
+    conn = None
     try:
         start_date = params.get('start_date')
         end_date = params.get('end_date')
@@ -231,17 +236,21 @@ def handle_list_reservations(params):
                 "id": res['id'],
                 "start_time": res['start_time'],
                 "end_time": res['end_time'],
-                "description": res['description'],
+                "description": res.get('description', ''),
                 "created_at": res['created_at']
             })
         
+        # Return dict - will be converted to single-line JSON
         return {"reservations": result, "count": len(result)}, None
     
     except Exception as e:
+        if conn:
+            conn.close()
         return None, f"Error listing reservations: {str(e)}"
 
 def handle_cancel_reservation(params):
     """Cancel a reservation by ID or time slot"""
+    conn = None
     try:
         reservation_id = params.get('id')
         start_time = params.get('start_time')
@@ -269,6 +278,9 @@ def handle_cancel_reservation(params):
         return "Reservation cancelled successfully", None
     
     except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
         return None, f"Error cancelling reservation: {str(e)}"
 
 @app.route('/health', methods=['GET'])
@@ -279,6 +291,7 @@ def health():
 @app.route('/reservations', methods=['GET'])
 def get_reservations():
     """Direct API endpoint to get all reservations (non-Vapi)"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor(cursor_factory=RealDictCursor)
@@ -292,12 +305,14 @@ def get_reservations():
                 "id": res['id'],
                 "start_time": res['start_time'],
                 "end_time": res['end_time'],
-                "description": res['description'],
+                "description": res.get('description', ''),
                 "created_at": res['created_at']
             })
         
         return jsonify({"reservations": result, "count": len(result)}), 200
     except Exception as e:
+        if conn:
+            conn.close()
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
